@@ -1,0 +1,14 @@
+# generated sim-shadow copies (rebuilt by gen_sim_shadow.py)
+sim_shadow/
+# GHDL work library + artifacts
+.ghdl_wd/
+.done
+.work_err
+a2x_axi
+*.o
+*.cf
+*.ghw
+results.xml
+__pycache__/
+# logs
+*.log
