@@ -71,11 +71,39 @@ all of `tri`. Everything else (`fuq.v`, `fuq_dcd/pic/cr2/fpr/scr/eie/eov/sto`,
   oss-cad GHDL 7 (LLVM) is required and is ~4s/file — the narrowed `top`
   library keeps first-run compile tractable; later runs are seconds.
 
+### Full-core `a2x_axi` (sim/coco)
+
+- **The entire core elaborates + links in open-EDA**: `sim/coco/a2x_axi` is a
+  ~196MB ELF built by oss-cad-suite GHDL 7-LLVM. `ghdl -r --work=work a2x_axi
+  --stop-time=N` runs clean standalone (no stimulus → quiescent, as expected).
+- Harness `sim/coco/run.sh` = `gen → analyze → elab → sim`:
+  - `gen_sim_shadow.py` derives `sim_shadow/{ibm,support,clib,tri}` with
+    `pin_bit_information` **attr-specs** stripped (elab bound-check fix) while
+    keeping the `pbi_t` type decl. `analyze` MUST use shadow `ibm`/`support`,
+    not canonical — otherwise `PIN_BIT_INFORMATION` fires at `ghdl -e/-r`.
+  - `analyze` is dependency-ordered + incremental (`.done`): pkg-first libs,
+    `tri`/`work` iterate to fixpoint because files instantiate each other.
+  - `unimacro_sim/bram_tdp_macro_sim.vhdl` is the behavioral TDP-BRAM arch
+    (entity-only mock → real array + INIT preload). WORDS clamps to DEPTH
+    (`ramb16_s9_s9`/ierat_cam: `128*256/9=3640 > 2048` → bound-check, fixed).
+  - GHDL obsoletion = `.o` mtime ordering: re-analyzing a package/entity
+    re-dates it and obsoletes dependents. `ghdl -m ... a2x_axi` re-analyzes the
+    whole `work` tree bottom-up and restores order — the recovery tool. The
+    `elab` self-heal loop only refreshes `work` units, never packages.
+  - cocotb 2.x VPI env: `GPI_USERS=<shared libpython.so>;<cocotb.simulator
+    .so>,initialize`, `PYGPI_PYTHON_BIN`, `COCOTB_TEST_MODULES=tb`,
+    `COCOTB_TOPLEVEL=a2x_axi`, `TOPLEVEL_LANG=vhdl`, `PYTHONPATH=sim/coco`
+    (all set in `run.sh`).
+- **Known blocker:** cocotb loads + runs `tb_a2x_axi_reset_and_axi`, prints
+  `reset released` at 40ns, then sim-time freezes at 44ns / 0% CPU — the
+  `Clock(dut.clk)` value-writes don't generate VHDL events under GHDL-LLVM's
+  VPI (design simulates fine standalone). Fix in flight: drive `clk`/`clk2x`
+  in a thin VHDL `tb_top` and keep cocotb for AXI only.
+
 ## Next (P1+)
 
+- Finish `sim/coco` clock-delivery (VHDL `tb_top` or cocotb workaround) so the
+  core advances past reset and issues an AXI fetch; then memory preload +
+  magic-address pass/fail per `../a2o/dev/sim/coco`.
 - Extend unit benches to `xuq_alu` (registered FXU ALU; bigger — threads,
   bypass, decode) and other `fuq_*`/`xuq_*` leaves (same `tb/` pattern).
-- `sim/coco` full-core cocotb bench on `a2x_axi` (AXI slave + memory preload +
-  magic-address pass/fail), reusing `../a2o/dev/sim/coco` patterns; needs a
-  behavioral BRAM architecture for `bram_tdp_macro_mock.vhdl` (entity-only).
-  cocotb 2.1.0 now installed.
