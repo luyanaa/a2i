@@ -62,13 +62,20 @@ all of `tri`. Everything else (`fuq.v`, `fuq_dcd/pic/cr2/fpr/scr/eie/eov/sto`,
     sign corrections that need the FPU normalize model to fold — a bit-exact
     check there is deferred to formal equivalence or a CPA-level test, not a
     DUT defect.
+- `python3 tools/run.py tb.tb_xuagen.xuq_agen` → **PASS**. `xuq_agen` is
+  combinational (no clock): `sum_non_erat = (x+y) mod 2^64` **exactly** (no
+  constant offset), `sum(0:51) = (x+y)>>12`, `sum_arr_dir*` = word bits 53–57,
+  `sum` = `snoop_addr` when `snoop_sel='1'`. Coverage: zero/small/single-hot
+  at field boundaries, all-ones, ~50 dense randoms, snoop path.
 - Toolchain note: system GHDL 5's mcode crashes on `PIN_BIT_INFORMATION`;
   oss-cad GHDL 7 (LLVM) is required and is ~4s/file — the narrowed `top`
   library keeps first-run compile tractable; later runs are seconds.
 
 ## Next (P1+)
 
-- Extend unit benches to `xuq_alu`, `xuq_agen` (same `tb/` pattern).
+- Extend unit benches to `xuq_alu` (registered FXU ALU; bigger — threads,
+  bypass, decode) and other `fuq_*`/`xuq_*` leaves (same `tb/` pattern).
 - `sim/coco` full-core cocotb bench on `a2x_axi` (AXI slave + memory preload +
   magic-address pass/fail), reusing `../a2o/dev/sim/coco` patterns; needs a
   behavioral BRAM architecture for `bram_tdp_macro_mock.vhdl` (entity-only).
+  cocotb 2.1.0 now installed.
