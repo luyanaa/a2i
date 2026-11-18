@@ -94,16 +94,26 @@ all of `tri`. Everything else (`fuq.v`, `fuq_dcd/pic/cr2/fpr/scr/eie/eov/sto`,
     .so>,initialize`, `PYGPI_PYTHON_BIN`, `COCOTB_TEST_MODULES=tb`,
     `COCOTB_TOPLEVEL=a2x_axi`, `TOPLEVEL_LANG=vhdl`, `PYTHONPATH=sim/coco`
     (all set in `run.sh`).
-- **Known blocker:** cocotb loads + runs `tb_a2x_axi_reset_and_axi`, prints
-  `reset released` at 40ns, then sim-time freezes at 44ns / 0% CPU — the
-  `Clock(dut.clk)` value-writes don't generate VHDL events under GHDL-LLVM's
-  VPI (design simulates fine standalone). Fix in flight: drive `clk`/`clk2x`
-  in a thin VHDL `tb_top` and keep cocotb for AXI only.
+- **Full-core simulation WORKS — the core fetches instructions over AXI.**
+  `./run.sh sim` → `TESTS=1 PASS=1`: `AR 0xFFFFFFF0` at 400ns (first fetch),
+  more fetches at 568/720/872ns, `[tb] PASS: 4 AXI transactions` at 920ns.
+  Two stacked bugs fixed:
+  - cocotb 2.1 `Clock()` VPI value-writes don't generate VHDL events under
+    GHDL-LLVM → sim froze at 44ns. Fix: `tb_top.vhdl` generates `clk`/`clk2x`
+    + reset natively in VHDL; cocotb keeps the AXI-slave/checker role only.
+    (Direct `a2x_axi` toplevel still available via `COCOTB_TOPLEVEL=a2x_axi`.)
+  - `AxiSlave` never drove `m00_axi_arready` → `'U'` poisoned `axi_load_taken`,
+    no read could complete. Fix: `arready=1` at init.
+  - Note: first AR at `0xFFFFFFF0` not the literal `0xFFFFFFFC` reset PC —
+    line-aligned A2L2→AXI mapping (fetch is cache-line granular); expected.
 
 ## Next (P1+)
 
-- Finish `sim/coco` clock-delivery (VHDL `tb_top` or cocotb workaround) so the
-  core advances past reset and issues an AXI fetch; then memory preload +
-  magic-address pass/fail per `../a2o/dev/sim/coco`.
+- Memory preload + magic-address pass/fail: extend `tb.py`/`MemModel` to load
+  a real program at the reset vector and detect the `0x2004`/`0x2000` magic
+  stores per `../a2o/dev/sim/coco`, so the core executes a known sequence and
+  self-checks rather than just fetching.
+- AXI data-path checks: verify RDATA actually returns the preloaded words
+  (the ARs above prove control flow; confirm data integrity next).
 - Extend unit benches to `xuq_alu` (registered FXU ALU; bigger — threads,
   bypass, decode) and other `fuq_*`/`xuq_*` leaves (same `tb/` pattern).
