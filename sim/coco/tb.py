@@ -16,6 +16,7 @@ import os
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer, First
+from cocotb.simtime import get_sim_time
 
 CFG = {
     "C_M00_AXI_ID_WIDTH": 4,
@@ -81,6 +82,7 @@ class AxiSlave:
     async def run(self):
         c = self.dut
         # inputs
+        c.m00_axi_arready.value = 1         # always ready for read addresses
         c.m00_axi_awready.value = 0
         c.m00_axi_wready.value = 0
         c.m00_axi_bvalid.value = 0
@@ -209,6 +211,51 @@ async def reset(dut, cycles=5):
     dut.reset_n.value = 1
     dut.thread_stop.value = 0            # release threads
     dut._log.info("[tb] reset released, threads running")
+
+
+@cocotb.test()
+async def tb_a2x_axi_tbtop(dut):
+    """Toplevel is tb_top (VHDL clk/clk2x generators + internal reset).
+
+    cocotb role is reduced to AXI slave + memory checker; it awaits
+    RisingEdge(dut.clk), which is now driven by real VHDL events.
+    """
+    mem = MemModel(build_program())
+    slave = AxiSlave(dut, mem)
+    slave_task = cocotb.start_soon(slave.run())
+
+    # scaffold success criterion: >=1 AXI AR (fetch) within MAX_CYCLES
+    async def heartbeat():
+        n = 0
+        while True:
+            await RisingEdge(dut.clk)
+            n += 1
+            if n % 100 == 0:
+                dut._log.info(f"[hb] {n} edges")
+    cocotb.start_soon(heartbeat())
+
+    cycles = 0
+    while slave.transactions == 0:
+        await RisingEdge(dut.clk)
+        cycles += 1
+        if cycles % 100 == 0:
+            dut._log.info(f"[tb] main {cycles} edges")
+        if cycles > MAX_CYCLES:
+            slave_task.cancel()
+            dut._log.error(
+                f"[tb] TIMEOUT at {get_sim_time('ns')}ns: no AXI "
+                f"transaction after {MAX_CYCLES} clk edges "
+                f"(reset completed, core did not fetch)")
+            raise AssertionError("no AXI fetch transaction seen")
+    dut._log.info(f"[tb] first AXI transaction at clk edge {cycles}")
+    # let the burst play out a bit
+    for _ in range(64):
+        await RisingEdge(dut.clk)
+    slave_task.cancel()
+    dut._log.info(
+        f"[tb] PASS: {slave.transactions} AXI transaction(s), "
+        f"{slave.reads} read(s), {slave.writes} write(s)")
+    assert slave.reads >= 1
 
 
 @cocotb.test()

@@ -143,12 +143,14 @@ stage_sim() {
   (cd "$ROOT/sim/coco" && \
     PYTHONPATH="$ROOT/sim/coco" \
     COCOTB_TEST_MODULES=tb \
-    COCOTB_TOPLEVEL=a2x_axi \
+    COCOTB_TEST_FILTER=${COCOTB_TEST_FILTER:-tb_a2x_axi_tbtop} \
+    COCOTB_TOPLEVEL=${COCOTB_TOPLEVEL:-tb_top} \
+    COCOTB_TEST_TOPLEVEL=${COCOTB_TOPLEVEL:-tb_top} \
     TOPLEVEL_LANG=vhdl \
     A2X_MAX_CYCLES=${A2X_MAX_CYCLES:-20000} \
     COCOTB_RESULTS_FILE="$ROOT/sim/coco/results.xml" \
     COCOTB_LOG_LEVEL=INFO \
-    $O/ghdl -r --work=work a2x_axi --vpi="$COCOTB_LIB" 2>&1 | tee -a "$LOG")
+    $O/ghdl -r --work=work ${COCOTB_TOPLEVEL:-tb_top} --ieee-asserts=disable --vpi="$COCOTB_LIB" 2>&1 | tee -a "$LOG")
 }
 
 case "${1:-all}" in
