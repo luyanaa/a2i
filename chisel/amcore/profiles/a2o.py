@@ -50,6 +50,16 @@ class OoOCore(PipelineSkeleton):
         self.cdb_val = Signal(64, name="cdb_val")
         self.cdb_valid = Signal(name="cdb_valid")
 
+    def ports(self):
+        from amaranth.hdl import IOPort
+        return [
+            IOPort(self.tag_w, name="cdb_tag"),
+            IOPort(64, name="cdb_val"),
+            IOPort(1, name="cdb_valid"),
+            IOPort(1, name="stall"),
+            IOPort(1, name="flush_all"),
+        ]
+
     def wire_stage(self, m: Module, i: int, st: Stage, prev):
         super().wire_stage(m, i, st, prev)
         if st.name == "rs":

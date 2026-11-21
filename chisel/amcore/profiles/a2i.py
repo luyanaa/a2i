@@ -64,6 +64,18 @@ class InOrderCore(PipelineSkeleton):
         self.ex_op_a = Signal(64, name="ex_op_a")
         self.ex_op_c = Signal(64, name="ex_op_c")
 
+    def ports(self):
+        """Top-level interface for emission / testbench."""
+        from amaranth.hdl import IOPort
+        return [
+            IOPort(64, name="rf_op_a"),
+            IOPort(64, name="rf_op_c"),
+            IOPort(64, name="wb_data"),
+            IOPort(1, name="wb_valid"),
+            IOPort(1, name="stall"),
+            IOPort(1, name="flush_all"),
+        ]
+
     # --- EX stage: instantiate the kernel, drive its act + operands ------
     def wire_stage(self, m: Module, i: int, st: Stage, prev):
         super().wire_stage(m, i, st, prev)
