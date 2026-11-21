@@ -67,6 +67,18 @@ class InOrderCore(PipelineSkeleton):
         self.ex_op_a = Signal(FPR_W, name="ex_op_a")
         self.ex_op_b = Signal(FPR_W, name="ex_op_b")
         self.ex_op_c = Signal(FPR_W, name="ex_op_c")
+        # EX combinational result — created here so rf's forward can read it
+        # before _build_ex assigns it during the ex stage's wire_stage.
+        self._ex_result = Signal(FPR_W, name="ex_result")
+        # Producer-tracking signals for the bypsel forward: the ex/wb stages
+        # assign these so rf (which elaborates earlier) can compare a source
+        # reg against the in-flight producer's destination + grab its result.
+        self.prod_ex_rt = Signal(6, name="prod_ex_rt")
+        self.prod_ex_rtv = Signal(name="prod_ex_rtv")
+        self.prod_ex_res = Signal(FPR_W, name="prod_ex_res")
+        self.prod_wb_rt = Signal(6, name="prod_wb_rt")
+        self.prod_wb_rtv = Signal(name="prod_wb_rtv")
+        self.prod_wb_res = Signal(FPR_W, name="prod_wb_res")
 
         # decoded fields carried id -> rf -> ex (operand + control)
         self._dcd = Decoded()
@@ -106,34 +118,25 @@ class InOrderCore(PipelineSkeleton):
                 st.override[nm] = sig
             # gate stage-valid on a successful decode so invalid ops die
             st.override["valid"] = self._dcd.valid & prev.valid
-            # RAW interlock (A2I bypsel drives this): if any valid source reg
-            # is scoreboard-busy, hold this instruction until the producer's
-            # writeback clears the busy bit. Stall this stage + upstream.
-            busy = Signal(name="raw_hazard")
-            m.d.comb += busy.eq(
-                (self._dcd.ra_v & self.sb_busy.bit_select(self._dcd.ra, 1)) |
-                (self._dcd.rb_v & self.sb_busy.bit_select(self._dcd.rb, 1)) |
-                (self._dcd.rc_v & self.sb_busy.bit_select(self._dcd.rc, 1)))
-            st.stall = busy
-            # mark the destination busy as the op enters decode (in-order
-            # single-issue means one producer in flight per reg is enough)
-            with m.If(prev.valid & self._dcd.valid & self._dcd.rt_v & ~busy):
+            # RAW is now handled by the RF-stage bypsel forward (op_a/b/c
+            # select FPR | ex-fwd | wb-fwd), NOT a stall — for this single-
+            # cycle FU the producer is always at EX/WB (forwardable) by the
+            # time a back-to-back consumer reaches RF. The scoreboard still
+            # marks destinations busy for bookkeeping / a future multi-cycle
+            # or unforwardable FU, where the stall returns.
+            with m.If(prev.valid & self._dcd.valid & self._dcd.rt_v):
                 m.d.sync += self.sb_busy.bit_select(self._dcd.rt, 1).eq(1)
 
         elif st.name == "rf":
-            # carry control forward; read FPR operands from decoded addresses.
-            # rf is a 7b reg id -> narrow to the 6b FPR index.
+            # carry control forward
             for nm in ("valid", "is_mul", "math_b", "sub_op_b", "inv_sign_b",
                        "from_int_b", "frsp_b", "rt", "ra", "rb", "rc",
                        "ra_v", "rb_v", "rc_v", "rt_v"):
                 sig = prev.payload[nm]
                 st.add(nm, sig.shape().width)
-            # operand registers (read comb at rf, registered into ex below)
+            # operand regs with the bypsel forward (FPR | ex-fwd | wb-fwd)
             st.add("op_a", FPR_W); st.add("op_b", FPR_W); st.add("op_c", FPR_W)
-            # reg ids are 7b; FPR array is 64-deep -> index on low 6 bits
-            st.override["op_a"] = self.fpr[prev.payload["ra"].bit_select(0, 6)]
-            st.override["op_b"] = self.fpr[prev.payload["rb"].bit_select(0, 6)]
-            st.override["op_c"] = self.fpr[prev.payload["rc"].bit_select(0, 6)]
+            self._rf_fwd(m, st, prev)
 
         elif st.name == "ex":
             for nm in ("valid", "is_mul", "rt", "rt_v"):
@@ -149,6 +152,39 @@ class InOrderCore(PipelineSkeleton):
             st.add("rt", 6); st.add("rt_v", 1); st.add("result", FPR_W)
             self._build_wb(m, st, prev)
         super().wire_stage(m, i, st, prev)
+
+    # --- RF operand forward (the bypsel mux) -------------------------------
+    def _rf_fwd(self, m, st, prev):
+        """Per-source operand select: FPR | forward from EX | forward from WB.
+
+        A dependent op reads its source register here. If that register is the
+        destination of the op currently in EX or WB (a producer still ahead of
+        the consumer), forward that result instead of the stale FPR value —
+        the `iu_fu_rf0_bypsel` mux. Prefer the EX forward over WB for a match
+        (EX is the younger producer in program order for a WAW pair).
+
+        Producer stage handles:
+          ex : self.stages[EX].payload  {rt, rt_v} + self._ex_result (comb)
+          wb : self.stages[WB].payload  {rt, rt_v, result}
+        """
+        ex_rt = self.prod_ex_rt
+        ex_rtv = self.prod_ex_rtv
+        wb_rt = self.prod_wb_rt
+        wb_rtv = self.prod_wb_rtv
+        wb_res = self.prod_wb_res
+
+        for src, out in (("ra", "op_a"), ("rb", "op_b"), ("rc", "op_c")):
+            s = prev.payload[src].bit_select(0, 6)
+            fpr_v = self.fpr[s]
+            hit_ex = ex_rtv & (ex_rt == s)
+            hit_wb = wb_rtv & (wb_rt == s)
+            fwd = Signal(FPR_W, name=f"{st.name}_{src}_fwd")
+            m.d.comb += fwd.eq(fpr_v)
+            with m.If(hit_ex):
+                m.d.comb += fwd.eq(self.prod_ex_res)
+            with m.Elif(hit_wb):
+                m.d.comb += fwd.eq(wb_res)
+            st.override[out] = fwd
 
     # --- EX: the fuq_mul kernel -------------------------------------------
     def _build_ex(self, m, st, prev):
@@ -177,9 +213,14 @@ class InOrderCore(PipelineSkeleton):
         # placeholder CPA; the real normalize/round is a follow-up).
         s = getattr(k, "p_f_mul_ex2_sum", None)
         r = getattr(k, "p_f_mul_ex2_car", None)
-        self._ex_result = Signal(FPR_W, name="ex_result")
         if s is not None and r is not None:
             m.d.comb += self._ex_result.eq(s[:FPR_W] + r[:FPR_W])
+        # publish this op as an EX-stage producer for the rf forward. Use the
+        # EX stage's OWN registered fields (st.payload), not prev's — at the
+        # cycle the consumer is in rf, the producer is in ex holding its rt.
+        m.d.comb += self.prod_ex_res.eq(self._ex_result)
+        m.d.comb += self.prod_ex_rt.eq(st.payload["rt"].bit_select(0, 6))
+        m.d.comb += self.prod_ex_rtv.eq(st.valid & st.payload["rt_v"])
 
     # --- WB: write FRT + clear scoreboard ---------------------------------
     def _build_wb(self, m, st, prev):
@@ -193,6 +234,10 @@ class InOrderCore(PipelineSkeleton):
         m.d.comb += self.wb_addr.eq(rt)
         m.d.comb += self.wb_data.eq(st.payload["result"])
         m.d.comb += self.wb_valid.eq(st.valid & st.payload["rt_v"])
+        # publish this op as a WB-stage producer for the rf forward
+        m.d.comb += self.prod_wb_rt.eq(rt)
+        m.d.comb += self.prod_wb_rtv.eq(st.valid & st.payload["rt_v"])
+        m.d.comb += self.prod_wb_res.eq(st.payload["result"])
         # architected writeback into the FPR + scoreboard clear (always-ready
         # write port in v1; a real RF may add backpressure later)
         with m.If(st.valid & st.payload["rt_v"]):
