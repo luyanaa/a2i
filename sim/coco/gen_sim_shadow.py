@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]             # worktree root
-A2I = ROOT / "rel"                                     # canonical source (git-tracked copy)
+A2I = Path('/shared/a2i/rel')
 SRC = A2I / "src" / "vhdl"
 OUT = Path(__file__).resolve().parent / "sim_shadow"
 
@@ -207,7 +207,11 @@ begin
   preload : process
     variable acc : std_logic_vector(0 to 128 * 256 - 1) := (others => '0');
     variable bv  : std_logic_vector(0 to 255);
-    constant WORDS : natural := 128 * 256 / WW;
+    -- INIT_xx packs 128*256 bits covering the full macro; the usable word
+    -- count is the *physical* depth, not packed_bits/WW (which overshoots
+    -- DEPTH whenever WW doesn't tile the region evenly, e.g. WW=9, DEPTH=2048:
+    -- 128*256/9 = 3640 > 2048). Clamp to the smaller of the two.
+    constant WORDS : natural := minimum(128 * 256 / WW, DEPTH);
   begin
     for c in 0 to 127 loop
       -- note: cannot index INIT_xx by name in a loop, so the values are
@@ -219,7 +223,9 @@ begin
     end loop;
     for a in 0 to WORDS - 1 loop
       for b in 0 to WW - 1 loop
-        mem(a)(b) := acc(a * WW + b);
+        if a * WW + b <= acc'high then
+          mem(a)(b) := acc(a * WW + b);
+        end if;
       end loop;
     end loop;
     wait;
