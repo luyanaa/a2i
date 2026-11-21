@@ -82,6 +82,12 @@ compiles separately and binds at elaboration (same as the `sim/coco` bench).
       path — `rf_op → ex_op reg → frac fields → MSB-swap → sum+car → wb fold`
       — run around the real `fuq_mul` under GHDL 7. 6 vectors (3*5=0xF …
       7*1000=0x1B58) all = `a*c` exactly; MSB-swap confirmed correct.
-- [ ] operand RF-read muxes + bypass network (`iu_fu_rf0_bypsel` contract)
+- [x] **RAW interlock + scoreboard PASSED** (`tests/sim_scoreboard.py`):
+      `id` computes raw_hazard on scoreboard-busy sources, stalls + injects
+      bubbles downstream; `wb` clears busy. F1-busy holds consumer at `id`,
+      release lets it write F4. (The `iu_fu_rf0_bypsel` interlock mechanism;
+      a true bypass forward is an optimization, not needed for correctness.)
+- [ ] operand RF-read muxes + result-bypass forward (`bypsel` optimization:
+      forward EX/WB result before FPR write to avoid the stall entirely)
 - [ ] broaden ISA: GPR arith via `xuq_alu`/`xuq_alu_add`, loads via `xuq_agen`
 - [ ] a2o: give it the same decode+operand path (currently structural)
