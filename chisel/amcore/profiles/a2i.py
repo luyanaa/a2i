@@ -188,24 +188,27 @@ class InOrderCore(PipelineSkeleton):
                 m.d.comb += fwd.eq(self.prod_ex_res)
             with m.Elif(hit_wb):
                 m.d.comb += fwd.eq(wb_res)
-            st.override[out] = fwd
+            # immediate form (addi/lwz/...): operand B <- sign-extended SIMM,
+            # resolved HERE so ex's kernel sees it registered, not recomputed
+            # from next-cycle rf fields.
+            if out == "op_b" and "uses_simm" in prev.payload:
+                simm = prev.payload["simm"]
+                imm = Cat(simm, simm[15].replicate(FPR_W - 16))
+                st.override[out] = Mux(prev.payload["uses_simm"], imm, fwd)
+            else:
+                st.override[out] = fwd
 
     # --- EX: the FU kernels (fuq_mul FP + xuq_alu_add GPR) ------------------
     def _build_ex(self, m, st, prev):
         fu_sel = prev.payload["fu_sel"]
         alu_op = prev.payload["alu_op"]
-        uses_simm = prev.payload["uses_simm"]
-        simm = prev.payload["simm"]
-
-        # operand B: immediate form (addi/addis) substitutes the sign-extended
-        # 16-bit SIMM for the RB register value.
-        op_b = Signal(FPR_W, name="ex_op_b_sel")
-        m.d.comb += op_b.eq(self.ex_op_b)
-        with m.If(uses_simm):
-            m.d.comb += op_b.eq(Cat(simm, simm[15].replicate(FPR_W - 16)))
+        # operands are resolved at rf (forward + SIMM substitute) and arrive
+        # registered: ex_op_a/b already hold the final values for the kernels.
+        op_b = self.ex_op_b
 
         is_fpu = fu_sel == Const(FU_FPU, 2)
         is_alu = fu_sel == Const(FU_FXU_ADD, 2)
+        is_agen = fu_sel == Const(FU_AGEN, 2)
 
         # ---- FU: fuq_mul (FP multiply) ------------------------------------
         self._ex = Kernel(self.fu_kernel)
@@ -265,8 +268,29 @@ class InOrderCore(PipelineSkeleton):
         if alu_rt is not None:
             m.d.comb += alu_res.eq(alu_rt)
 
+        # ---- FU: xuq_agen (load/store effective address = RA + SIMM) -------
+        self._agen = Kernel("xuq_agen")
+        m.submodules.ex_agen = kg = self._agen
+        gx = getattr(kg, "p_x", None); gy = getattr(kg, "p_y", None)
+        if gx is not None:
+            m.d.comb += gx.eq(self.ex_op_a)      # RA base
+        if gy is not None:
+            m.d.comb += gy.eq(op_b)              # SIMM displacement
+        for nm, val in (("p_mode64", 1), ("p_snoop_sel", 0), ("p_binv_val", 0),
+                        ("p_dir_ig_57_b", 0), ("p_snoop_addr", 0),
+                        ("p_z", 0), ("p_way", 0), ("p_inv1_val_b", 0),
+                        ("p_ex1_cache_acc_b", 0), ("p_rel3_val", 0)):
+            p = getattr(kg, nm, None)
+            if p is not None:
+                m.d.comb += p.eq(val)
+        ea = getattr(kg, "p_sum_non_erat", None)   # 64b effective address
+        agen_res = Signal(FPR_W, name="agen_res")
+        if ea is not None:
+            m.d.comb += agen_res.eq(ea)
+
         # ---- result mux by FU + publish producer for the rf forward -------
-        m.d.comb += self._ex_result.eq(Mux(is_alu, alu_res, fpu_res))
+        m.d.comb += self._ex_result.eq(
+            Mux(is_alu, alu_res, Mux(is_agen, agen_res, fpu_res)))
         # EX stage's OWN registered fields — at the cycle a consumer is in rf,
         # the producer is in ex holding its rt.
         m.d.comb += self.prod_ex_res.eq(self._ex_result)

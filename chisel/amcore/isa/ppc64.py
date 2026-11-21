@@ -43,6 +43,12 @@ OP_FP = 63            # scalar FP arithmetic + moves
 OP_XO = 31            # GPR arithmetic/logical (add, subf, and, or, xor, ...)
 OP_ADDI = 14          # addi   RT <- RA + SIMM
 OP_ADDIS = 15         # addis  RT <- RA + (SIMM << 16)
+# D-form loads/stores: EA = RA + SIMM (displacement). Data movement, not
+# arithmetic — goes to the AGEN to form the effective address.
+OP_LWZ = 32           # lwz  RT <- mem[RA+SIMM]
+OP_STW = 36           # stw  mem[RA+SIMM] <- RT(store data in RT field slot)
+OP_LD = 58            # ld   RT <- mem[RA+DS]  (DS-form, low 2b = 0)
+OP_STD = 62           # std  mem[RA+DS] <- RT
 
 # XO codes (low 5b, instr[26:30]) — shared field across FP and GPR ops.
 # FP multiply class
@@ -75,6 +81,10 @@ ALUOP_ADD = 0       # rs0 + rs1          (add / addi / addis)
 ALUOP_SUBF = 1      # rs1 - rs0          (subf)
 ALUOP_CMP = 2       # compare (sets ex2_cr_recform, no GPR write)
 
+# AGEN op-select (drives the load/store effective-address path).
+AGEN_LOAD = 0       # EA = RA + SIMM, result is an address for a LOAD
+AGEN_STORE = 1      # EA = RA + SIMM, address for a STORE (RT is data source)
+
 # Decode table rows:
 #   (pri, xo_or_None, fu_sel, is_mul, math_b, sub_op, inv_sign, from_int,
 #    frsp, alu_op, ra_v, rb_v, rc_v, rt_v, uses_simm)
@@ -96,6 +106,13 @@ _TABLE = [
     # ---- immediate add (own primary) ----
     (OP_ADDI, None,     FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_ADD,  1,0,0,1, 1),
     (OP_ADDIS, None,    FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_ADD,  1,0,0,1, 1),
+    # ---- D-form load/store -> AGEN for the effective address ----
+    #   load : reads RA (+SIMM), writes RT with the loaded data -> rt_v=1
+    #   store: reads RA (+SIMM) AND RT (store data) -> rt_v=0, rt used as src
+    (OP_LWZ, None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_LOAD,  1,0,0,1, 1),
+    (OP_STW, None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_STORE, 1,0,0,0, 1),
+    (OP_LD,  None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_LOAD,  1,0,0,1, 1),
+    (OP_STD, None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_STORE, 1,0,0,0, 1),
 ]
 
 
