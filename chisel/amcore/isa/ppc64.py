@@ -37,6 +37,7 @@ RA = slice(16, 21)    # RA / FRA         instr[11:15] -> Am 16..20
 RB = slice(11, 16)    # RB / FRB         instr[16:20] -> Am 11..15
 RC = slice(6, 11)     # RC / FRC         instr[21:25] -> Am 6..10
 XO = slice(1, 6)      # XO (low 5b)      instr[26:30] -> Am 1..5
+XOW = slice(1, 11)    # XO (full 10b)    instr[21:30] -> Am 1..10 ; pri-31 ops
 RCBIT = 0             # Rc               instr[31]    -> Am 0
 
 OP_FP = 63            # scalar FP arithmetic + moves
@@ -49,6 +50,10 @@ OP_LWZ = 32           # lwz  RT <- mem[RA+SIMM]
 OP_STW = 36           # stw  mem[RA+SIMM] <- RT(store data in RT field slot)
 OP_LD = 58            # ld   RT <- mem[RA+DS]  (DS-form, low 2b = 0)
 OP_STD = 62           # std  mem[RA+DS] <- RT
+# immediate logical ops (D-form): RT <- RA <fcn> UIMM (zero-extended 16b)
+OP_ANDI = 28          # andi.  (Rc=1 forced)
+OP_ORI = 24           # ori
+OP_XORI = 26          # xori
 
 # XO codes (low 5b, instr[26:30]) — shared field across FP and GPR ops.
 # FP multiply class
@@ -65,6 +70,20 @@ XO_FCFIDS = 798 & 0b11111   # =30 ; v1 matches low 5b, tighten later
 XO_ADD = 266 & 0b11111      # =10   add   RT <- RA + RB
 XO_SUBF = 40  & 0b11111     # =8    subf  RT <- RB - RA
 XO_CMP = 0                  #       cmp   RA vs RB (CR write, no RT)
+# GPR logical ops — full 10-bit XO instr[21:30] (low-5b collides: or=444 and
+# and=28 share low5b=28). Use XOW-wide values for these.
+XO_AND = 28
+XO_OR = 444
+XOX = XOXOR = 316           # (avoid clashing with XO const name)
+XO_XOR = 316
+XO_NAND = 476
+XO_NOR = 124
+XO_ANDC = 60
+XO_EQV = 568
+# marker: an XO value OR'd with WIDE matches the full 10-bit XOW field
+# (instr[1:11]) instead of the low 5 bits — needed for GPR ops where several
+# share the same low-5b tail (e.g. and=28 vs or=444 -> both low5b=28).
+WIDE = 0x10000
 
 # is_mul operation selector -> operand source / formatting in the pipeline.
 SEL_FMUL = 0        # A * C
@@ -75,6 +94,7 @@ SEL_FCFID = 2       # int64 -> fraction
 FU_FPU = 0          # fuq_*  (FP datapath)
 FU_FXU_ADD = 1      # xuq_alu_add (GPR add/sub/cmp adder)
 FU_AGEN = 2         # xuq_agen    (load/store effective address)
+FU_FXU_LOG = 3      # xuq_alu     (GPR logical ops via the logic unit)
 
 # GPR arithmetic op-select (drives dec_alu_rf1_* controls on xuq_alu_add).
 ALUOP_ADD = 0       # rs0 + rs1          (add / addi / addis)
@@ -85,34 +105,57 @@ ALUOP_CMP = 2       # compare (sets ex2_cr_recform, no GPR write)
 AGEN_LOAD = 0       # EA = RA + SIMM, result is an address for a LOAD
 AGEN_STORE = 1      # EA = RA + SIMM, address for a STORE (RT is data source)
 
+# xuq_alu logic-unit function select: log_fcn(0..3) is a 2-input truth table
+# (MSB-first) gating minterms ~a~b,~a·b,a·~b,a·b -> out = OR of enabled terms.
+LOG_AND = 0b0001    # a & b        (minterm3)
+LOG_OR = 0b0111     # a | b        (m1+m2+m3)
+LOG_XOR = 0b0110    # a ^ b        (m1+m2)
+LOG_NAND = 0b1110   # ~(a & b)     (m0+m1+m2)
+LOG_NOR = 0b1000    # ~(a | b)     (m0)
+LOG_ANDC = 0b0010   # a & ~b       (m2)
+LOG_EQV = 0b1001    # a == b       (m0+m3)
+
 # Decode table rows:
 #   (pri, xo_or_None, fu_sel, is_mul, math_b, sub_op, inv_sign, from_int,
-#    frsp, alu_op, ra_v, rb_v, rc_v, rt_v, uses_simm)
-# xo_or_None=None matches any XO (immediate-form ops); else low-5b XO match.
+#    frsp, alu_op, ra_v, rb_v, rc_v, rt_v, uses_simm, log_fcn)
+# xo_or_None=None matches any XO (immediate-form ops); else XO match. An XO
+# OR'd with WIDE matches the full 10-bit field (pri-31 ops collide on low5b).
 _TABLE = [
     # ---- FP multiply family (pri 63) ----
-    (OP_FP, XO_FMUL,    FU_FPU, SEL_FMUL,      1,0,0,0,0, 0, 1,0,1,1, 0),
-    (OP_FP, XO_FMULS,   FU_FPU, SEL_FMUL,      1,0,0,0,1, 0, 1,0,1,1, 0),
-    (OP_FP, XO_FMSUB,   FU_FPU, SEL_FMADD_SUB, 1,1,0,0,0, 0, 1,1,1,1, 0),
-    (OP_FP, XO_FMSUBS,  FU_FPU, SEL_FMADD_SUB, 1,1,0,0,1, 0, 1,1,1,1, 0),
-    (OP_FP, XO_FNMSUB,  FU_FPU, SEL_FMADD_SUB, 1,1,1,0,0, 0, 1,1,1,1, 0),
-    (OP_FP, XO_FNMSUBS, FU_FPU, SEL_FMADD_SUB, 1,1,1,0,1, 0, 1,1,1,1, 0),
-    (OP_FP, XO_FCFID,   FU_FPU, SEL_FCFID,     0,0,0,1,0, 0, 0,1,0,1, 0),
-    (OP_FP, XO_FCFIDS,  FU_FPU, SEL_FCFID,     0,0,0,1,1, 0, 0,1,0,1, 0),
+    (OP_FP, XO_FMUL,    FU_FPU, SEL_FMUL,      1,0,0,0,0, 0, 1,0,1,1, 0, 0),
+    (OP_FP, XO_FMULS,   FU_FPU, SEL_FMUL,      1,0,0,0,1, 0, 1,0,1,1, 0, 0),
+    (OP_FP, XO_FMSUB,   FU_FPU, SEL_FMADD_SUB, 1,1,0,0,0, 0, 1,1,1,1, 0, 0),
+    (OP_FP, XO_FMSUBS,  FU_FPU, SEL_FMADD_SUB, 1,1,0,0,1, 0, 1,1,1,1, 0, 0),
+    (OP_FP, XO_FNMSUB,  FU_FPU, SEL_FMADD_SUB, 1,1,1,0,0, 0, 1,1,1,1, 0, 0),
+    (OP_FP, XO_FNMSUBS, FU_FPU, SEL_FMADD_SUB, 1,1,1,0,1, 0, 1,1,1,1, 0, 0),
+    (OP_FP, XO_FCFID,   FU_FPU, SEL_FCFID,     0,0,0,1,0, 0, 0,1,0,1, 0, 0),
+    (OP_FP, XO_FCFIDS,  FU_FPU, SEL_FCFID,     0,0,0,1,1, 0, 0,1,0,1, 0, 0),
     # ---- GPR arithmetic (pri 31 + XO low5b) ----
-    (OP_XO, XO_ADD,     FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_ADD,  1,1,0,1, 0),
-    (OP_XO, XO_SUBF,    FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_SUBF, 1,1,0,1, 0),
-    (OP_XO, XO_CMP,     FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_CMP,  1,1,0,0, 0),
+    (OP_XO, XO_ADD,     FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_ADD,  1,1,0,1, 0, 0),
+    (OP_XO, XO_SUBF,    FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_SUBF, 1,1,0,1, 0, 0),
+    (OP_XO, XO_CMP,     FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_CMP,  1,1,0,0, 0, 0),
     # ---- immediate add (own primary) ----
-    (OP_ADDI, None,     FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_ADD,  1,0,0,1, 1),
-    (OP_ADDIS, None,    FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_ADD,  1,0,0,1, 1),
+    (OP_ADDI, None,     FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_ADD,  1,0,0,1, 1, 0),
+    (OP_ADDIS, None,    FU_FXU_ADD, 0, 0,0,0,0,0, ALUOP_ADD,  1,0,0,1, 1, 0),
     # ---- D-form load/store -> AGEN for the effective address ----
     #   load : reads RA (+SIMM), writes RT with the loaded data -> rt_v=1
     #   store: reads RA (+SIMM) AND RT (store data) -> rt_v=0, rt used as src
-    (OP_LWZ, None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_LOAD,  1,0,0,1, 1),
-    (OP_STW, None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_STORE, 1,0,0,0, 1),
-    (OP_LD,  None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_LOAD,  1,0,0,1, 1),
-    (OP_STD, None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_STORE, 1,0,0,0, 1),
+    (OP_LWZ, None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_LOAD,  1,0,0,1, 1, 0),
+    (OP_STW, None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_STORE, 1,0,0,0, 1, 0),
+    (OP_LD,  None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_LOAD,  1,0,0,1, 1, 0),
+    (OP_STD, None,      FU_AGEN, 0, 0,0,0,0,0, AGEN_STORE, 1,0,0,0, 1, 0),
+    # ---- GPR logicals (pri 31 + full-10b XO; also immediate D-form) ----
+    #   rt <- ra <fcn> rb   (or ra <fcn> UIMM for the D-form ops)
+    (OP_XO, XO_AND|WIDE,  FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,1,0,1, 0, LOG_AND),
+    (OP_XO, XO_OR |WIDE,  FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,1,0,1, 0, LOG_OR),
+    (OP_XO, XO_XOR|WIDE,  FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,1,0,1, 0, LOG_XOR),
+    (OP_XO, XO_NAND|WIDE, FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,1,0,1, 0, LOG_NAND),
+    (OP_XO, XO_NOR |WIDE, FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,1,0,1, 0, LOG_NOR),
+    (OP_XO, XO_ANDC|WIDE, FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,1,0,1, 0, LOG_ANDC),
+    (OP_XO, XO_EQV |WIDE, FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,1,0,1, 0, LOG_EQV),
+    (OP_ANDI, None,       FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,0,0,1, 1, LOG_AND),
+    (OP_ORI,  None,       FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,0,0,1, 1, LOG_OR),
+    (OP_XORI, None,       FU_FXU_LOG, 0, 0,0,0,0,0, 0, 1,0,0,1, 1, LOG_XOR),
 ]
 
 
@@ -146,6 +189,7 @@ class Decoded:
         self.alu_op = Signal(2, name="dcd_alu_op")     # ALUOP_* for FU_FXU_ADD
         self.uses_simm = Signal(name="dcd_uses_simm")  # operand B <- SIMM not RB
         self.simm = Signal(16, name="dcd_simm")         # instr[16:31] immediate
+        self.log_fcn = Signal(4, name="dcd_log_fcn")   # truth-table sel (FU_FXU_LOG)
 
     def emit(self, m: Module, instr: Signal, domain: str = "comb"):
         """Drive all control signals combinationally from `instr`."""
@@ -164,20 +208,29 @@ class Decoded:
             self.from_int_b.eq(0), self.frsp_b.eq(0),
             self.ra_v.eq(0), self.rb_v.eq(0), self.rc_v.eq(0),
             self.rt_v.eq(0), self.alu_op.eq(ALUOP_ADD), self.uses_simm.eq(0),
+            self.log_fcn.eq(0),
         ]
-        # Two-level decode: primary opcode, then (for XO-form ops) the low-5b
-        # XO. A row with xo=None matches its primary regardless of XO.
+        # Two-level decode: primary opcode, then XO. A row with xo=None matches
+        # its primary regardless of XO; an xo OR'd with WIDE matches the full
+        # 10-bit XOW field, else the low-5b XO.
+        xowf = instr[XOW]
         first_p = True
         for pri_op in {row[0] for row in _TABLE}:
             ctx_p = m.If if first_p else m.Elif
             first_p = False
             with ctx_p(pri == Const(pri_op, 6)):
                 first_x = True
-                for (p2, xo, fu, is_mul, math, sub, inv, fi, frsp,
-                     aluop, av, bv, cv, tv, usi) in _TABLE:
-                    if p2 != pri_op:
+                for row in _TABLE:
+                    if row[0] != pri_op:
                         continue
-                    cond = Const(1) if xo is None else (xof == Const(xo, 5))
+                    (p2, xo, fu, is_mul, math, sub, inv, fi, frsp,
+                     aluop, av, bv, cv, tv, usi, lfcn) = row
+                    if xo is None:
+                        cond = Const(1)
+                    elif xo & WIDE:
+                        cond = xowf == Const(xo & ~WIDE, 10)
+                    else:
+                        cond = xof == Const(xo, 5)
                     if first_x:
                         ctx_x = m.If(cond); first_x = False
                     else:
@@ -191,7 +244,7 @@ class Decoded:
                             self.alu_op.eq(aluop),
                             self.ra_v.eq(av), self.rb_v.eq(bv),
                             self.rc_v.eq(cv), self.rt_v.eq(tv),
-                            self.uses_simm.eq(usi),
+                            self.uses_simm.eq(usi), self.log_fcn.eq(lfcn),
                         ]
         return self
 
