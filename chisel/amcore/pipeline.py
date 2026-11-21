@@ -33,6 +33,10 @@ class Stage:
     valid: Signal = field(default_factory=Signal)
     flush: Signal = field(default_factory=Signal)
     payload: dict = field(default_factory=dict)
+    # field name -> Value: source override. When set, the stage registers
+    # this expression instead of forwarding prev.payload[name]. Still inside
+    # the ~stall / ~flush envelope, so stall semantics are preserved.
+    override: dict = field(default_factory=dict)
 
     def add(self, signame: str, width: int) -> Signal:
         s = Signal(width, name=f"{self.name}_{signame}")
@@ -68,7 +72,9 @@ class PipelineSkeleton(Elaboratable):
             else:
                 m.d.sync += st.valid.eq(prev.valid)
             for name, s in st.payload.items():
-                if prev is not None and name in prev.payload:
+                if name in st.override:
+                    m.d.sync += s.eq(st.override[name])
+                elif prev is not None and name in prev.payload:
                     m.d.sync += s.eq(prev.payload[name])
     # --------------------------------------------------------------------
 
