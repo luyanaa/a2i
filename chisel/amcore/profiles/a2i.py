@@ -12,9 +12,11 @@ full decode -> operand -> kernel -> writeback plumbing before ISA breadth.
 
 from __future__ import annotations
 
-from amaranth import Array, Const, Module, Signal
+from amaranth import Array, Cat, Const, Module, Mux, Signal
 
-from ..isa.ppc64 import Decoded, SEL_FCFID, SEL_FMADD_SUB, SEL_FMUL
+from ..isa.ppc64 import (ALUOP_ADD, ALUOP_CMP, ALUOP_SUBF, Decoded,
+                         FU_FPU, FU_FXU_ADD, FU_AGEN,
+                         SEL_FCFID, SEL_FMADD_SUB, SEL_FMUL)
 from ..kernel import Kernel
 from ..pipeline import PipelineSkeleton, Stage
 
@@ -111,7 +113,8 @@ class InOrderCore(PipelineSkeleton):
             st.add("instr", 32)
             self._dcd.emit(m, prev.payload["instr"])
             for nm in ("valid", "is_mul", "math_b", "sub_op_b", "inv_sign_b",
-                       "from_int_b", "frsp_b", "rt", "ra", "rb", "rc",
+                       "from_int_b", "frsp_b", "fu_sel", "alu_op", "uses_simm",
+                       "simm", "rt", "ra", "rb", "rc",
                        "ra_v", "rb_v", "rc_v", "rt_v"):
                 sig = getattr(self._dcd, nm)
                 st.add(nm, sig.shape().width)
@@ -130,7 +133,8 @@ class InOrderCore(PipelineSkeleton):
         elif st.name == "rf":
             # carry control forward
             for nm in ("valid", "is_mul", "math_b", "sub_op_b", "inv_sign_b",
-                       "from_int_b", "frsp_b", "rt", "ra", "rb", "rc",
+                       "from_int_b", "frsp_b", "fu_sel", "alu_op", "uses_simm",
+                       "simm", "rt", "ra", "rb", "rc",
                        "ra_v", "rb_v", "rc_v", "rt_v"):
                 sig = prev.payload[nm]
                 st.add(nm, sig.shape().width)
@@ -139,7 +143,7 @@ class InOrderCore(PipelineSkeleton):
             self._rf_fwd(m, st, prev)
 
         elif st.name == "ex":
-            for nm in ("valid", "is_mul", "rt", "rt_v"):
+            for nm in ("valid", "is_mul", "fu_sel", "alu_op", "rt", "rt_v"):
                 sig = prev.payload[nm]
                 st.add(nm, sig.shape().width)
             # register the operands into EX (the f_fmt_ex1_* contract)
@@ -186,38 +190,85 @@ class InOrderCore(PipelineSkeleton):
                 m.d.comb += fwd.eq(wb_res)
             st.override[out] = fwd
 
-    # --- EX: the fuq_mul kernel -------------------------------------------
+    # --- EX: the FU kernels (fuq_mul FP + xuq_alu_add GPR) ------------------
     def _build_ex(self, m, st, prev):
+        fu_sel = prev.payload["fu_sel"]
+        alu_op = prev.payload["alu_op"]
+        uses_simm = prev.payload["uses_simm"]
+        simm = prev.payload["simm"]
+
+        # operand B: immediate form (addi/addis) substitutes the sign-extended
+        # 16-bit SIMM for the RB register value.
+        op_b = Signal(FPR_W, name="ex_op_b_sel")
+        m.d.comb += op_b.eq(self.ex_op_b)
+        with m.If(uses_simm):
+            m.d.comb += op_b.eq(Cat(simm, simm[15].replicate(FPR_W - 16)))
+
+        is_fpu = fu_sel == Const(FU_FPU, 2)
+        is_alu = fu_sel == Const(FU_FXU_ADD, 2)
+
+        # ---- FU: fuq_mul (FP multiply) ------------------------------------
         self._ex = Kernel(self.fu_kernel)
         m.submodules.ex_fu = k = self._ex
-
         act = getattr(k, "c_ex1_act", None)
         if act is not None:
-            m.d.comb += act.eq(st.valid & ~st.flush & ~self.stall)
+            m.d.comb += act.eq(st.valid & is_fpu & ~st.flush & ~self.stall)
         fl = getattr(k, "c_flush", None)
         if fl is not None:
             m.d.comb += fl.eq(st.flush | self.flush_all)
-
-        # operand formatting per decode: FPR value -> fuq_mul frac fields.
-        # v1 truncates to field width (exponents/format-normalisation is the
-        # datapath-correctness follow-up); fcfid routes the integer into C.
         a = getattr(k, "p_f_fmt_ex1_a_frac", None)
         c = getattr(k, "p_f_fmt_ex1_c_frac", None)
-        is_fcfid = prev.payload["is_mul"] == Const(SEL_FCFID, 2)
         if a is not None:
             m.d.comb += a.eq(self.ex_op_a[:A_FRAC_W])
         if c is not None:
             m.d.comb += c.eq(self.ex_op_c[:C_FRAC_W])
-
-        # carry-save product -> a single wb value (v1: sum+car folded by a
-        # placeholder CPA; the real normalize/round is a follow-up).
         s = getattr(k, "p_f_mul_ex2_sum", None)
         r = getattr(k, "p_f_mul_ex2_car", None)
+        fpu_res = Signal(FPR_W, name="fpu_res")
         if s is not None and r is not None:
-            m.d.comb += self._ex_result.eq(s[:FPR_W] + r[:FPR_W])
-        # publish this op as an EX-stage producer for the rf forward. Use the
-        # EX stage's OWN registered fields (st.payload), not prev's — at the
-        # cycle the consumer is in rf, the producer is in ex holding its rt.
+            m.d.comb += fpu_res.eq(s[:FPR_W] + r[:FPR_W])
+
+        # ---- FU: xuq_alu_add (GPR add/subf/cmp) ----------------------------
+        self._alu = Kernel("xuq_alu_add")
+        m.submodules.ex_alu = ka = self._alu
+        aact = getattr(ka, "c_dec_alu_rf1_add_act", None)
+        if aact is not None:
+            m.d.comb += aact.eq(st.valid & is_alu & ~st.flush & ~self.stall)
+        rs0 = getattr(ka, "p_byp_alu_ex1_rs0", None)
+        rs1 = getattr(ka, "p_byp_alu_ex1_rs1", None)
+        if rs0 is not None:
+            m.d.comb += rs0.eq(self.ex_op_a)
+        if rs1 is not None:
+            m.d.comb += rs1.eq(op_b)
+        inv = getattr(ka, "p_dec_alu_rf1_add_rs0_inv", None)
+        if inv is not None:
+            # rs0_inv is a 64-bit per-bit XOR MASK (x_b = aop ^ rs0_inv), not a
+            # flag: all-ones inverts rs0 so ~rs0 + rs1 + ci = rs1 - rs0 (subf);
+            # all-zeros passes rs0 through (add/cmp).
+            m.d.comb += inv.eq(Mux(alu_op == Const(ALUOP_SUBF, 2),
+                                   Const(-1, FPR_W), Const(0, FPR_W)))
+        ci = getattr(ka, "p_dec_alu_rf1_add_ci", None)
+        if ci is not None:
+            m.d.comb += ci.eq(alu_op == Const(ALUOP_SUBF, 2))
+        for nm, val in (("p_dec_alu_rf1_select_64bmode", 1),
+                        ("p_dec_alu_rf1_is_cmpl", 0),
+                        ("p_dec_alu_rf1_tw_cmpsel", 0),
+                        ("p_dec_alu_ex1_is_cmp", alu_op == Const(ALUOP_CMP, 2)),
+                        ("p_log_add_ex2_rt", 0),
+                        ("p_dec_ex2_tid", 0), ("p_dec_ex4_tid", 0),
+                        ("p_spr_msr_cm", 1)):
+            p = getattr(ka, nm, None)
+            if p is not None:
+                m.d.comb += p.eq(val)
+        alu_rt = getattr(ka, "p_alu_byp_ex2_rt", None)
+        alu_res = Signal(FPR_W, name="alu_res")
+        if alu_rt is not None:
+            m.d.comb += alu_res.eq(alu_rt)
+
+        # ---- result mux by FU + publish producer for the rf forward -------
+        m.d.comb += self._ex_result.eq(Mux(is_alu, alu_res, fpu_res))
+        # EX stage's OWN registered fields — at the cycle a consumer is in rf,
+        # the producer is in ex holding its rt.
         m.d.comb += self.prod_ex_res.eq(self._ex_result)
         m.d.comb += self.prod_ex_rt.eq(st.payload["rt"].bit_select(0, 6))
         m.d.comb += self.prod_ex_rtv.eq(st.valid & st.payload["rt_v"])
