@@ -78,8 +78,10 @@ compiles separately and binds at elaboration (same as the `sim/coco` bench).
       fmul/fmsub/fnmadd family + fcfid; unknown op → valid=0
 - [x] a2i full path: instr → decode → 64-deep FPR read → fuq_mul → FRT
       writeback + scoreboard (`rf_op_* → ex_op_* → f_fmt_ex1_* → sum+car`)
-- [ ] **numeric check**: drive `fmul` through generated `.v` + golden
-      `fuq_mul`, verify `wb_data` (fixer lane — proves MSB-swap)
+- [x] **numeric check PASSED** (`tests/tb_a2i_wrap`): the generated operand
+      path — `rf_op → ex_op reg → frac fields → MSB-swap → sum+car → wb fold`
+      — run around the real `fuq_mul` under GHDL 7. 6 vectors (3*5=0xF …
+      7*1000=0x1B58) all = `a*c` exactly; MSB-swap confirmed correct.
 - [ ] operand RF-read muxes + bypass network (`iu_fu_rf0_bypsel` contract)
 - [ ] broaden ISA: GPR arith via `xuq_alu`/`xuq_alu_add`, loads via `xuq_agen`
 - [ ] a2o: give it the same decode+operand path (currently structural)
