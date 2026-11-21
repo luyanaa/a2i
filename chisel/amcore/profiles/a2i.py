@@ -15,7 +15,7 @@ from __future__ import annotations
 from amaranth import Array, Cat, Const, Module, Mux, Signal
 
 from ..isa.ppc64 import (ALUOP_ADD, ALUOP_CMP, ALUOP_SUBF, Decoded,
-                         FU_FPU, FU_FXU_ADD, FU_AGEN, FU_FXU_LOG,
+                         FU_FPU, FU_FXU_ADD, FU_AGEN, FU_FXU_LOG, FU_FXU_MUL,
                          SEL_FCFID, SEL_FMADD_SUB, SEL_FMUL)
 from ..kernel import Kernel
 from ..pipeline import PipelineSkeleton, Stage
@@ -114,7 +114,8 @@ class InOrderCore(PipelineSkeleton):
             self._dcd.emit(m, prev.payload["instr"])
             for nm in ("valid", "is_mul", "math_b", "sub_op_b", "inv_sign_b",
                        "from_int_b", "frsp_b", "fu_sel", "alu_op", "uses_simm",
-                       "simm", "log_fcn", "rt", "ra", "rb", "rc",
+                       "simm", "log_fcn", "mul_ret", "mul_size", "mul_imm",
+                       "mul_sign", "rt", "ra", "rb", "rc",
                        "ra_v", "rb_v", "rc_v", "rt_v"):
                 sig = getattr(self._dcd, nm)
                 st.add(nm, sig.shape().width)
@@ -134,7 +135,8 @@ class InOrderCore(PipelineSkeleton):
             # carry control forward
             for nm in ("valid", "is_mul", "math_b", "sub_op_b", "inv_sign_b",
                        "from_int_b", "frsp_b", "fu_sel", "alu_op", "uses_simm",
-                       "simm", "log_fcn", "rt", "ra", "rb", "rc",
+                       "simm", "log_fcn", "mul_ret", "mul_size", "mul_imm",
+                       "mul_sign", "rt", "ra", "rb", "rc",
                        "ra_v", "rb_v", "rc_v", "rt_v"):
                 sig = prev.payload[nm]
                 st.add(nm, sig.shape().width)
@@ -144,6 +146,7 @@ class InOrderCore(PipelineSkeleton):
 
         elif st.name == "ex":
             for nm in ("valid", "is_mul", "fu_sel", "alu_op", "log_fcn",
+                       "mul_ret", "mul_size", "mul_imm", "mul_sign",
                        "rt", "rt_v"):
                 sig = prev.payload[nm]
                 st.add(nm, sig.shape().width)
@@ -207,10 +210,11 @@ class InOrderCore(PipelineSkeleton):
         # registered: ex_op_a/b already hold the final values for the kernels.
         op_b = self.ex_op_b
 
-        is_fpu = fu_sel == Const(FU_FPU, 2)
-        is_alu = fu_sel == Const(FU_FXU_ADD, 2)
-        is_agen = fu_sel == Const(FU_AGEN, 2)
-        is_log = fu_sel == Const(FU_FXU_LOG, 2)
+        is_fpu = fu_sel == Const(FU_FPU, 3)
+        is_alu = fu_sel == Const(FU_FXU_ADD, 3)
+        is_agen = fu_sel == Const(FU_AGEN, 3)
+        is_log = fu_sel == Const(FU_FXU_LOG, 3)
+        is_mul = fu_sel == Const(FU_FXU_MUL, 3)
 
         # ---- FU: fuq_mul (FP multiply) ------------------------------------
         self._ex = Kernel(self.fu_kernel)
@@ -305,27 +309,48 @@ class InOrderCore(PipelineSkeleton):
             m.d.comb += ls0.eq(self.ex_op_a)
         if ls1 is not None:
             m.d.comb += ls1.eq(op_b)
+        # mul operands: ex1-comb reads (byp_alu_ex1_mulsrc_*)
+        ms0 = getattr(kl, "p_byp_alu_ex1_mulsrc_0", None)
+        ms1 = getattr(kl, "p_byp_alu_ex1_mulsrc_1", None)
+        if ms0 is not None:
+            m.d.comb += ms0.eq(self.ex_op_a)
+        if ms1 is not None:
+            m.d.comb += ms1.eq(op_b)
         lsel = getattr(kl, "p_dec_alu_rf1_sel", None)
         if lsel is not None:
-            m.d.comb += lsel.eq(Const(0, 4))     # sel=0 -> rot/log path
+            # sel(0)=1 picks the ADD subunit; 0 = rot/log. Mul is gated by its
+            # own dec_alu_rf1_mul_val, not by sel — keep 0 for log+mul.
+            m.d.comb += lsel.eq(Const(0, 4))
         lfcn = getattr(kl, "p_dec_alu_rf1_log_fcn", None)
         if lfcn is not None:
             m.d.comb += lfcn.eq(prev.payload["log_fcn"])
+        # mul controls: rf1-latched on dec_alu_rf1_mul_val (active when is_mul)
+        mval = getattr(kl, "c_dec_alu_rf1_mul_val", None)
+        if mval is not None:
+            m.d.comb += mval.eq(st.valid & is_mul & ~st.flush & ~self.stall)
+        for nm, fld in (("p_dec_alu_rf1_mul_ret", "mul_ret"),
+                        ("p_dec_alu_rf1_mul_size", "mul_size"),
+                        ("p_dec_alu_rf1_mul_imm", "mul_imm"),
+                        ("p_dec_alu_rf1_mul_sign", "mul_sign")):
+            p = getattr(kl, nm, None)
+            if p is not None:
+                m.d.comb += p.eq(prev.payload[fld])
+        mrt = getattr(kl, "p_alu_byp_ex5_mul_rt", None)
+        mul_res = Signal(FPR_W, name="mul_res")
+        if mrt is not None:
+            m.d.comb += mul_res.eq(mrt)
         # tie off the mul/div/shift/isel + compare machinery (logicals only)
         for nm, val in (
                 ("p_spr_msr_cm", 1), ("p_dec_alu_rf1_add_rs0_inv", 0),
                 ("p_dec_alu_rf1_add_ci", 0), ("p_dec_alu_rf1_is_cmpl", 0),
                 ("p_dec_alu_rf1_tw_cmpsel", 0), ("p_dec_ex2_tid", 0),
                 ("p_dec_ex4_tid", 0), ("p_dec_alu_rf1_mul_recform", 0),
-                ("c_dec_alu_rf1_mul_val", 0), ("p_dec_alu_rf1_mul_ret", 0),
-                ("p_dec_alu_rf1_mul_sign", 0), ("p_dec_alu_rf1_mul_size", 0),
-                ("p_dec_alu_rf1_mul_imm", 0), ("p_fxa_fxb_rf1_div_ctr", 0),
+                ("p_fxa_fxb_rf1_div_ctr", 0),
                 ("c_dec_alu_rf1_div_val", 0), ("p_dec_alu_rf1_div_sign", 0),
                 ("p_dec_alu_rf1_div_size", 0), ("p_dec_alu_rf1_div_extd", 0),
                 ("p_dec_alu_rf1_div_recform", 0), ("p_dec_alu_ex1_is_cmp", 0),
                 ("p_dec_alu_rf1_select_64bmode", 1),
                 ("c_fxa_fxb_ex1_hold_ctr_flush", 0),
-                ("p_byp_alu_ex1_mulsrc_0", 0), ("p_byp_alu_ex1_mulsrc_1", 0),
                 ("p_byp_alu_ex1_divsrc_0", 0), ("p_byp_alu_ex1_divsrc_1", 0),
                 ("p_byp_alu_rf1_isel_fcn", 0), ("p_dec_alu_rf1_sh_amt", 0),
                 ("p_dec_alu_rf1_mb_ins", 0), ("p_dec_alu_rf1_me_ins_b", 0),
@@ -339,10 +364,15 @@ class InOrderCore(PipelineSkeleton):
             m.d.comb += log_res.eq(log_rt)
 
         # ---- result mux by FU + publish producer for the rf forward -------
+        # NOTE: mul_res is the kernel's 5-cycle ex5 output — for a mul op the
+        # single-cycle _ex_result read here is the *launch* value, not the
+        # product. A real mul-aware WB needs the ex5-timed path + dependent
+        # stalls; v1 wires the path so the controls/operands reach the kernel.
         m.d.comb += self._ex_result.eq(
             Mux(is_alu, alu_res,
                 Mux(is_agen, agen_res,
-                    Mux(is_log, log_res, fpu_res))))
+                    Mux(is_log, log_res,
+                        Mux(is_mul, mul_res, fpu_res)))))
         # EX stage's OWN registered fields — at the cycle a consumer is in rf,
         # the producer is in ex holding its rt.
         m.d.comb += self.prod_ex_res.eq(self._ex_result)
