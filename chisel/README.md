@@ -87,7 +87,12 @@ compiles separately and binds at elaboration (same as the `sim/coco` bench).
       bubbles downstream; `wb` clears busy. F1-busy holds consumer at `id`,
       release lets it write F4. (The `iu_fu_rf0_bypsel` interlock mechanism;
       a true bypass forward is an optimization, not needed for correctness.)
-- [ ] operand RF-read muxes + result-bypass forward (`bypsel` optimization:
-      forward EX/WB result before FPR write to avoid the stall entirely)
+- [x] **bypsel forward PASSED** (`tests/sim_bypass.py`): rf operand select
+      picks FPR | ex-fwd | wb-fwd via prod_ex_*/prod_wb_* producer tracking;
+      dependent fmul completes with **zero stalls** (was a scoreboard stall).
+- [x] **a2o OoO profile PASSED** (`tests/sim_a2o.py`): same decode+kernel as
+      a2i but tag-based control — rename dest tag, RS operand-ready wakeup on
+      the CDB broadcast, in-order retire [1,4]. The unified-generator thesis:
+      one decode+kernel set, two interchangeable control profiles.
 - [ ] broaden ISA: GPR arith via `xuq_alu`/`xuq_alu_add`, loads via `xuq_agen`
 - [ ] a2o: give it the same decode+operand path (currently structural)
