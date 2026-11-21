@@ -74,7 +74,12 @@ compiles separately and binds at elaboration (same as the `sim/coco` bench).
 - [x] manifest generator (7 kernels, verified vs entities)
 - [x] `Kernel` blackbox + MSB-first swap (verified: `fuq_mul` inst correct)
 - [x] a2i + a2o skeletons emit with kernel instantiated
-- [ ] drive `ex1_act`/operands from a stage payload (not constants)
-- [ ] cocotb check vs `tb_fumul` golden vectors through generated wrapper
-- [ ] ISA decode tables → control-signal generation
-- [ ] operand RF-read muxes + writeback + bypass network
+- [x] PPC64 decode → `f_dcd_rf1_*` control contract (`isa/ppc64.py`):
+      fmul/fmsub/fnmadd family + fcfid; unknown op → valid=0
+- [x] a2i full path: instr → decode → 64-deep FPR read → fuq_mul → FRT
+      writeback + scoreboard (`rf_op_* → ex_op_* → f_fmt_ex1_* → sum+car`)
+- [ ] **numeric check**: drive `fmul` through generated `.v` + golden
+      `fuq_mul`, verify `wb_data` (fixer lane — proves MSB-swap)
+- [ ] operand RF-read muxes + bypass network (`iu_fu_rf0_bypsel` contract)
+- [ ] broaden ISA: GPR arith via `xuq_alu`/`xuq_alu_add`, loads via `xuq_agen`
+- [ ] a2o: give it the same decode+operand path (currently structural)
