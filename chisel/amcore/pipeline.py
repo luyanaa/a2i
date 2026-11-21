@@ -32,6 +32,7 @@ class Stage:
     name: str
     valid: Signal = field(default_factory=Signal)
     flush: Signal = field(default_factory=Signal)
+    stall: Signal = field(default_factory=Signal)
     payload: dict = field(default_factory=dict)
     # field name -> Value: source override. When set, the stage registers
     # this expression instead of forwarding prev.payload[name]. Still inside
@@ -64,9 +65,18 @@ class PipelineSkeleton(Elaboratable):
     def wire_stage(self, m: Module, i: int, st: Stage, prev: Optional[Stage]):
         """Register `st` from `prev` (valid + payload). Default = straight
         feedthrough with stall/flush; profiles override to add logic."""
+        # st.stall freezes this stage (holds valid+payload); self.stall is a
+        # global hold. Per-stage stall is what an interlock drives when a
+        # younger op must wait on a producer still in flight.
+        hold = self.stall | st.stall
+        # A stalled upstream stage injects a bubble (valid=0) downstream so a
+        # held instruction isn't re-issued every cycle.
+        upstream_stall = prev.stall if prev is not None else Const(0)
         with m.If(self.flush_all | st.flush):
             m.d.sync += st.valid.eq(0)
-        with m.Elif(~self.stall):
+        with m.Elif(upstream_stall):
+            m.d.sync += st.valid.eq(0)        # bubble on upstream hold
+        with m.Elif(~hold):
             if prev is None:
                 m.d.sync += st.valid.eq(1)   # source stage
             else:

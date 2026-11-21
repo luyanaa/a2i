@@ -26,14 +26,18 @@ from __future__ import annotations
 
 from amaranth import Const, Module, Signal
 
-# ---- PowerISA field slices (MSB-first -> Amaranth [lo:hi]) ----------------
-# instr[a:b] (IBM numbering) -> Amaranth instr[32-b : 32-a].
-PRI = slice(26, 32)   # primary opcode   instr[0:6]
-RT = slice(21, 26)    # RT / FRT         instr[6:11]
-RA = slice(11, 16)    # RA / FRA         instr[11:16]
-RB = slice(6, 11)     # RB / FRB         instr[16:21]
-RC = slice(1, 6)      # RC / FRC         instr[21:26]
-XO = slice(0, 5)      # XO (low 5b)      instr[26:31]
+# ---- PowerISA field slices (IBM MSB-first -> Amaranth [lo:hi]) ------------
+# IBM numbers bits MSB=0 .. LSB=31; instr[a:b] is the INCLUSIVE bit range.
+# An Amaranth Signal index j is weight 2^j (LSB-first), so IBM bit b maps to
+# Amaranth bit 31-b. Field instr[a:b] -> Amaranth bits (31-b)..(31-a), i.e.
+# slice(31-b, 32-a). Verified: PRI instr[0:5] -> Am [26:32).
+PRI = slice(26, 32)   # primary opcode   instr[0:5]   -> Am 26..31
+RT = slice(21, 26)    # RT / FRT         instr[6:10]  -> Am 21..25
+RA = slice(16, 21)    # RA / FRA         instr[11:15] -> Am 16..20
+RB = slice(11, 16)    # RB / FRB         instr[16:20] -> Am 11..15
+RC = slice(6, 11)     # RC / FRC         instr[21:25] -> Am 6..10
+XO = slice(1, 6)      # XO (low 5b)      instr[26:30] -> Am 1..5
+RCBIT = 0             # Rc               instr[31]    -> Am 0
 
 OP_FP = 63            # scalar FP arithmetic + moves
 

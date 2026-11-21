@@ -58,7 +58,6 @@ class InOrderCore(PipelineSkeleton):
         self.wb_addr = Signal(6, name="wb_addr")
         self.wb_data = Signal(FPR_W, name="wb_data")
         self.wb_valid = Signal(name="wb_valid")
-        self.wb_ready = Signal(name="wb_ready")  # always-ready v1
 
         # ---- scoreboard: 1 busy bit per FPR ------------------------------
         self.sb_busy = Signal(NFPR, name="sb_busy")
@@ -85,7 +84,9 @@ class InOrderCore(PipelineSkeleton):
 
     # --- per-stage wiring -------------------------------------------------
     def wire_stage(self, m: Module, i: int, st: Stage, prev):
-        super().wire_stage(m, i, st, prev)
+        # NOTE: populate st.payload + st.override FIRST, then call
+        # super().wire_stage which actually emits the registers — calling it
+        # first would register an empty payload.
         d = self._dcd
 
         if st.name == "if":
@@ -105,6 +106,19 @@ class InOrderCore(PipelineSkeleton):
                 st.override[nm] = sig
             # gate stage-valid on a successful decode so invalid ops die
             st.override["valid"] = self._dcd.valid & prev.valid
+            # RAW interlock (A2I bypsel drives this): if any valid source reg
+            # is scoreboard-busy, hold this instruction until the producer's
+            # writeback clears the busy bit. Stall this stage + upstream.
+            busy = Signal(name="raw_hazard")
+            m.d.comb += busy.eq(
+                (self._dcd.ra_v & self.sb_busy.bit_select(self._dcd.ra, 1)) |
+                (self._dcd.rb_v & self.sb_busy.bit_select(self._dcd.rb, 1)) |
+                (self._dcd.rc_v & self.sb_busy.bit_select(self._dcd.rc, 1)))
+            st.stall = busy
+            # mark the destination busy as the op enters decode (in-order
+            # single-issue means one producer in flight per reg is enough)
+            with m.If(prev.valid & self._dcd.valid & self._dcd.rt_v & ~busy):
+                m.d.sync += self.sb_busy.bit_select(self._dcd.rt, 1).eq(1)
 
         elif st.name == "rf":
             # carry control forward; read FPR operands from decoded addresses.
@@ -134,6 +148,7 @@ class InOrderCore(PipelineSkeleton):
         elif st.name == "wb":
             st.add("rt", 6); st.add("rt_v", 1); st.add("result", FPR_W)
             self._build_wb(m, st, prev)
+        super().wire_stage(m, i, st, prev)
 
     # --- EX: the fuq_mul kernel -------------------------------------------
     def _build_ex(self, m, st, prev):
@@ -178,8 +193,9 @@ class InOrderCore(PipelineSkeleton):
         m.d.comb += self.wb_addr.eq(rt)
         m.d.comb += self.wb_data.eq(st.payload["result"])
         m.d.comb += self.wb_valid.eq(st.valid & st.payload["rt_v"])
-        # architected writeback into the FPR + scoreboard clear
-        with m.If(st.valid & st.payload["rt_v"] & self.wb_ready):
+        # architected writeback into the FPR + scoreboard clear (always-ready
+        # write port in v1; a real RF may add backpressure later)
+        with m.If(st.valid & st.payload["rt_v"]):
             m.d.sync += self.fpr[rt].eq(st.payload["result"])
             m.d.sync += self.sb_busy.bit_select(rt, 1).eq(0)
         # external FPR preload (test vectors / LSU)
