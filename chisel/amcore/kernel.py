@@ -41,6 +41,19 @@ PERVASIVE_TIE = {
     "mpw2_b": 1,
     "sg_1": 0,              # scan gate off => functional path
     "thold_1": 0,           # thold=0 => plain rising-edge regs
+    # ---- *_dc / func_sl_* family (xuq_alu_add, xuq_alu, ...): the OTHER
+    # pervasive naming. func_sl_thold_0_b is ACTIVE-LOW thold — '1' deasserts
+    # it so the tri rlmlatches (expand_type=1) clock; '0' would freeze every
+    # registered control (verified: subf rs0_inv/ci never latched until 1).
+    "d_mode_dc": 0,
+    "delay_lclkr_dc": 0,
+    "mpw1_dc_b": 0,
+    "mpw2_dc_b": 0,
+    "func_sl_force": 0,
+    "func_sl_thold_0_b": 1,   # active-low: 1 = run, 0 = hold
+    "sg_0": 0,
+    "scan_in": 0,             # scan chain input tied low (scan_out left open)
+    "scan_out": None,         # scan chain output unconnected
 }
 
 # Pervasive *enable* pins (dc_act family) that the manifest may classify as
