@@ -18,7 +18,8 @@ from amaranth import Const, Module
 from amaranth.sim import Simulator
 
 from amcore.isa.ppc64 import (FU_FXU_MUL, OP_XO, OP_MULLI,
-                              XO_MULLW, XO_MULHW, XO_MULHWU, Decoded)
+                              XO_MULLW, XO_MULHW, XO_MULHWU,
+                              XO_MULLD, XO_MULHD, XO_MULHDU, Decoded)
 
 
 def enc_xo(rt, ra, rb, xo9, pri=OP_XO, rc=0):
@@ -52,6 +53,9 @@ def main():
         ("mullw",  enc_xo(1, 2, 3, XO_MULLW),  0, 0, 0, 1, 0),
         ("mulhw",  enc_xo(1, 2, 3, XO_MULHW),  1, 0, 0, 1, 0),
         ("mulhwu", enc_xo(1, 2, 3, XO_MULHWU), 1, 0, 0, 0, 0),
+        ("mulld",  enc_xo(1, 2, 3, XO_MULLD),  0, 1, 0, 1, 0),
+        ("mulhd",  enc_xo(1, 2, 3, XO_MULHD),  1, 1, 0, 1, 0),
+        ("mulhdu", enc_xo(1, 2, 3, XO_MULHDU), 1, 1, 0, 0, 0),
         ("mulli",  enc_d(OP_MULLI, 1, 2, 9),   0, 1, 1, 1, 1),
     ]
 

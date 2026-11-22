@@ -13,6 +13,13 @@
 --
 -- Semantics (from xuq_dec_b.vhdl): mul_size 0=32x32(mullw) 1=64x64(mulld/mulli);
 -- mul_sign 1=signed 0=unsigned; mul_imm 1=16b SE immediate; mul_ret 1=high half.
+--
+-- RESULT-CAPTURE CONTRACT (measured in this bench):
+--   mul_size=0 (mullw/mulhw/mulhwu): ex5 product, stable ~5 edges after rf1.
+--   mul_size=1 (mulld/mulhd/mulli): 64x64 recirculates through the ex2_mulsrc
+--     32b-swap network; product is a ~1-cycle pulse right after the
+--     alu_ex4_mul_done flag — capture on (done4 edge + 2). The pipeline WB must
+--     latch mul_rt on mul_done, not read a fixed-cycle launch value.
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -148,10 +155,16 @@ begin
       -- keep operands stable for `hold` extra cycles so the 64x64 Booth
       -- recirculation (ex2_mulsrc swap network) re-reads them correctly.
       for h in 2 to hold loop wait until rising_edge(clk); end loop;
-      -- alu_byp_ex5_mul_rt is the ex5-registered product: valid ~5 cycles
-      -- after the rf1 edge (done3/done4 are early-completion flags, 1-2
-      -- cycles BEFORE the result actually lands). Sample at +5.
-      for i in 0 to 4 loop wait until rising_edge(clk); end loop;
+      -- For 32x32: ex5 product is stable ~5 edges after rf1. For 64x64 the
+      -- product is a 1-cycle pulse right after the ex4 done flag — wait for
+      -- done4 then read the next edge.
+      if size='1' then
+        wait until done4='1';
+        wait until rising_edge(clk);
+        wait until rising_edge(clk);
+      else
+        for i in 0 to 4 loop wait until rising_edge(clk); end loop;
+      end if;
       got := unsigned(to_stdlogicvector(res));
       assert got = expv
         report tag & " FAIL got=0x"&to_hstring(got)&" exp=0x"&to_hstring(expv)
@@ -170,11 +183,15 @@ begin
     tc(16#10000#, 16#10000#, '1','0','1','0', "mulhw 2^16*2^16", to_unsigned(1,64));
     -- mulhwu: high 32, unsigned (sign=0)
     tc(16#10000#, 16#10000#, '0','0','1','0', "mulhwu 2^16*2^16", to_unsigned(1,64));
-    -- NOTE: mulld/mulli (mul_size=1, 64x64) place the product differently in
-    -- mul_rt (result << 32 observed) — the Booth recirculation reads a 32-bit
-    -- shifted window that needs the operand packed per the golden mulsrc
-    -- layout. Deferred; mullw/mulhw/mulhwu (mul_size=0) are verified.
-    report "tb_alumul: mul probes done (mullw/mulhw/mulhwu PASS)";
+    -- mulld/mulli (mul_size=1, 64x64): product is a 1-cycle pulse right after
+    -- the ex4 done flag (later than the 32x32 ops, extra Booth recirculation).
+    tc(6,   7,   '1','1','0','0', "mulld 6*7",   to_unsigned(42,64), 1);
+    tc(3,   5,   '1','1','0','0', "mulld 3*5",   to_unsigned(15,64), 1);
+    tc(16#100#, 16#20#, '1','1','0','0', "mulld 0x100*0x20", to_unsigned(16#2000#,64), 1);
+    -- mulli: mul_imm=1 (operand B = the 16b SE immediate; in the bench we just
+    -- drive a value as mulsrc_1 the same way — mul_imm only affects retsel)
+    tc(9,   12,  '1','1','0','1', "mulli 9*12",  to_unsigned(108,64), 1);
+    report "tb_alumul: mul probes done";
     done <= true;
     wait;
   end process;
