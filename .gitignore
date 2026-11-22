@@ -1,0 +1,14 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# GHDL / VUnit build artifacts
+*.o
+e~*.o
+work-obj*.cf
+.ghdl_wd/
+vunit_out/
+
+# Elaborated testbench binaries (ghdl -e output lands in worktree root)
+/tb_*
+/sim/coco/tb_top
